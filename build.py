@@ -1,95 +1,179 @@
 #!/usr/bin/env python3
-"""Build script: minify Python files for micro:bit deployment.
+"""Build script: create standalone micro:bit program.
 
-Keeps source files readable, creates minified versions in build/ directory.
-Usage: python build.py [--flash] [--upload]
+Combines src/*.py into a single standalone.py, then minifies it.
+No need to upload separate library files!
+
+Usage: python build.py [--flash]
 """
-import os
 import sys
 import subprocess
 import shutil
+import re
 from pathlib import Path
 
 SRC_DIR = Path("src")
 BUILD_DIR = Path("build")
-MAIN_FILE = "main.py"
-LIB_FILES = ["maqueen_plus_v3.py", "laser_matrix.py"]
 
-def minify_file(src: Path, dst: Path) -> bool:
-    """Minify a Python file using pyminify."""
+# Order matters: dependencies first
+LIB_FILES = ["laser_matrix.py", "maqueen_plus_v3.py"]
+MAIN_FILE = "main.py"
+
+
+def extract_imports_and_code(filepath: Path) -> tuple[set, list]:
+    """Extract standard imports and code from a Python file."""
+    content = filepath.read_text()
+    lines = content.split('\n')
+
+    imports = set()
+    code_lines = []
+    skip_until_class = False
+    in_try_block = False
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Skip docstrings at file start
+        if stripped.startswith('"""') or stripped.startswith("'''"):
+            i += 1
+            continue
+
+        # Skip try/except ImportError blocks entirely
+        if stripped == 'try:' and i + 1 < len(lines):
+            next_line = lines[i + 1].strip()
+            if 'from laser_matrix import' in next_line or 'import laser_matrix' in next_line:
+                # Skip: try, import, except, LaserMatrix = None
+                i += 4
+                continue
+
+        # Collect standard library imports
+        if stripped.startswith('from microbit import') or \
+           stripped.startswith('import neopixel') or \
+           stripped.startswith('import music'):
+            imports.add(stripped)
+            i += 1
+            continue
+
+        # Skip local imports (we'll embed them)
+        if stripped.startswith('from maqueen_plus_v3 import') or \
+           stripped.startswith('from laser_matrix import') or \
+           stripped.startswith('import maqueen_plus_v3') or \
+           stripped.startswith('import laser_matrix'):
+            i += 1
+            continue
+
+        code_lines.append(line)
+        i += 1
+
+    return imports, code_lines
+
+
+def build_standalone() -> Path:
+    """Combine all source files into a single standalone file."""
+    print("Building standalone version...")
+
+    BUILD_DIR.mkdir(exist_ok=True)
+
+    all_imports = set()
+    all_code = []
+
+    # Process library files first
+    for lib in LIB_FILES:
+        lib_path = SRC_DIR / lib
+        if lib_path.exists():
+            imports, code = extract_imports_and_code(lib_path)
+            all_imports.update(imports)
+            all_code.append(f"\n# === {lib} ===")
+            all_code.extend(code)
+            print(f"  Added {lib}")
+
+    # Process main file
+    main_path = SRC_DIR / MAIN_FILE
+    if main_path.exists():
+        imports, code = extract_imports_and_code(main_path)
+        all_imports.update(imports)
+        all_code.append(f"\n# === {MAIN_FILE} ===")
+        all_code.extend(code)
+        print(f"  Added {MAIN_FILE}")
+
+    # Combine into standalone file
+    standalone_path = BUILD_DIR / "standalone.py"
+
+    # Sort imports for consistency
+    sorted_imports = sorted(all_imports)
+
+    with open(standalone_path, 'w') as f:
+        f.write('"""Standalone Obstacle Avoidance - Auto-generated"""\n')
+        for imp in sorted_imports:
+            f.write(imp + '\n')
+        f.write('\n'.join(all_code))
+
+    src_size = standalone_path.stat().st_size
+    print(f"  Combined: {src_size} bytes")
+
+    return standalone_path
+
+
+def minify(src: Path) -> Path:
+    """Minify a Python file."""
+    dst = src.with_suffix('.min.py')
+
     try:
         result = subprocess.run(
             ["pyminify", "--remove-literal-statements", str(src)],
             capture_output=True, text=True
         )
         if result.returncode == 0:
-            dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(result.stdout)
             src_size = src.stat().st_size
             dst_size = dst.stat().st_size
             reduction = (1 - dst_size / src_size) * 100
-            print(f"  {src.name}: {src_size} -> {dst_size} bytes ({reduction:.0f}% smaller)")
-            return True
+            print(f"  Minified: {dst_size} bytes ({reduction:.0f}% smaller)")
+            return dst
         else:
-            print(f"  ERROR minifying {src}: {result.stderr}")
-            return False
+            print(f"  Minify failed: {result.stderr}")
+            return src
     except FileNotFoundError:
-        print("ERROR: pyminify not found. Install with: pip install python-minifier")
-        return False
+        print("  WARNING: pyminify not found, using unminified version")
+        return src
 
-def build():
-    """Build minified versions of all source files."""
-    print("Building minified files...")
 
-    # Clean build directory
-    if BUILD_DIR.exists():
-        shutil.rmtree(BUILD_DIR)
-    BUILD_DIR.mkdir()
+def flash(filepath: Path) -> bool:
+    """Flash file to micro:bit using auto-mount script."""
+    print(f"\nFlashing {filepath.name}...")
 
-    success = True
+    # Try flash_microbit.sh first (handles mounting)
+    flash_script = Path("flash_microbit.sh")
+    if flash_script.exists():
+        result = subprocess.run(["./flash_microbit.sh", str(filepath)])
+        return result.returncode == 0
 
-    # Minify main file
-    src = SRC_DIR / MAIN_FILE
-    if src.exists():
-        success &= minify_file(src, BUILD_DIR / MAIN_FILE)
-    else:
-        print(f"  WARNING: {src} not found")
-
-    # Minify library files
-    for lib in LIB_FILES:
-        src = SRC_DIR / lib
-        if src.exists():
-            success &= minify_file(src, BUILD_DIR / lib)
-        else:
-            print(f"  WARNING: {src} not found")
-
-    if success:
-        print(f"\nBuild complete! Files in {BUILD_DIR}/")
-    return success
-
-def flash():
-    """Flash main.py to micro:bit."""
-    main_file = BUILD_DIR / MAIN_FILE
-    if not main_file.exists():
-        print("Build first!")
-        return False
-
-    print(f"\nFlashing {main_file}...")
-    result = subprocess.run(["uflash", str(main_file)])
+    # Fallback to uflash
+    result = subprocess.run(["uflash", str(filepath)])
     return result.returncode == 0
 
-def upload():
-    """Upload library files to micro:bit filesystem."""
-    print("\nUploading libraries...")
-    for lib in LIB_FILES:
-        lib_file = BUILD_DIR / lib
-        if lib_file.exists():
-            print(f"  Uploading {lib}...")
-            result = subprocess.run(["ufs", "put", str(lib_file)])
-            if result.returncode != 0:
-                print(f"  ERROR uploading {lib}")
-                return False
-    return True
+
+def build():
+    """Full build process."""
+    # Clean
+    if BUILD_DIR.exists():
+        shutil.rmtree(BUILD_DIR)
+
+    # Combine sources
+    standalone = build_standalone()
+
+    # Minify
+    minified = minify(standalone)
+
+    # Copy as main.py for flashing
+    final = BUILD_DIR / "main.py"
+    shutil.copy(minified, final)
+
+    print(f"\nBuild complete! {final}")
+    return final
+
 
 def main():
     args = sys.argv[1:]
@@ -97,30 +181,18 @@ def main():
     if "--help" in args or "-h" in args:
         print(__doc__)
         print("Options:")
-        print("  (no args)  Build minified files only")
-        print("  --flash    Build and flash main.py")
-        print("  --upload   Build and upload libraries")
-        print("  --all      Build, flash, and upload")
+        print("  (no args)  Build standalone version only")
+        print("  --flash    Build and flash to micro:bit")
         return
 
-    # Always build first
-    if not build():
-        sys.exit(1)
+    final = build()
 
-    if "--all" in args:
-        if not flash():
+    if "--flash" in args:
+        if not flash(final):
             sys.exit(1)
-        if not upload():
-            sys.exit(1)
-    else:
-        if "--flash" in args:
-            if not flash():
-                sys.exit(1)
-        if "--upload" in args:
-            if not upload():
-                sys.exit(1)
 
     print("\nDone!")
+
 
 if __name__ == "__main__":
     main()
