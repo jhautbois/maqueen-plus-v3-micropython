@@ -77,6 +77,28 @@ flash_file() {
     fi
 }
 
+# Function to upload libraries
+upload_libs() {
+    local dir=$1
+    echo ""
+    echo "Uploading libraries..."
+
+    # Wait for micro:bit to be ready after flash
+    sleep 3
+
+    for lib in "maqueen_plus_v3.py" "laser_matrix.py"; do
+        if [ -f "$dir/$lib" ]; then
+            echo "  Uploading $lib..."
+            ufs put "$dir/$lib" 2>/dev/null || {
+                echo "  Retrying $lib..."
+                sleep 1
+                ufs put "$dir/$lib"
+            }
+        fi
+    done
+    echo "✓ Libraries uploaded!"
+}
+
 # Main workflow
 main() {
     # Check if device exists
@@ -100,6 +122,15 @@ main() {
         if ! flash_file "$1"; then
             exit 1
         fi
+
+        # Get directory of flashed file
+        FILE_DIR=$(dirname "$1")
+
+        # Upload libraries if they exist in the same directory
+        if [ -f "$FILE_DIR/maqueen_plus_v3.py" ] || [ -f "$FILE_DIR/laser_matrix.py" ]; then
+            upload_libs "$FILE_DIR"
+        fi
+
         echo ""
         echo "✓ All done!"
         echo ""
@@ -112,7 +143,7 @@ main() {
         echo "✓ micro:bit is ready"
         echo ""
         echo "Usage: $0 <file.py>"
-        echo "Example: $0 test_laser_simple.py"
+        echo "Example: $0 build/main.py"
     fi
 }
 

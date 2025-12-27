@@ -38,11 +38,27 @@ else
 endif
 
 # ========== Phony Targets ==========
-.PHONY: all flash upload upload-libs clean repl scan test help install-deps
+.PHONY: all flash upload upload-libs clean repl scan test help install-deps build
+
+# ========== Build (Minification) ==========
+
+BUILD_DIR = build
+
+# Build minified files (keeps src/ readable)
+build:
+	@echo "Building minified files..."
+	python3 build.py
+	@echo "✓ Build complete! Minified files in $(BUILD_DIR)/"
+
+# Build and deploy (minified)
+deploy: build
+	@echo "Deploying minified files..."
+	python3 build.py --all
+	@echo "✓ Deploy complete!"
 
 # ========== Main Targets ==========
 
-# Default target: flash and upload everything
+# Default target: flash and upload everything (from src/, not minified)
 all: flash upload
 	@echo ""
 	@echo "✓ All files deployed!"
@@ -222,8 +238,12 @@ check:
 help:
 	@echo "Maqueen Plus V3 - MicroPython Makefile"
 	@echo ""
-	@echo "Development Commands:"
-	@echo "  make all          - Flash main.py and upload libraries (default)"
+	@echo "Build & Deploy (Minified):"
+	@echo "  make build        - Build minified files (src/ -> build/)"
+	@echo "  make deploy       - Build, flash, and upload minified files"
+	@echo ""
+	@echo "Development Commands (Non-minified):"
+	@echo "  make all          - Flash main.py and upload libraries"
 	@echo "  make flash        - Flash main.py to micro:bit"
 	@echo "  make upload       - Upload library files to filesystem"
 	@echo "  make ls           - List files on micro:bit"

@@ -64,6 +64,8 @@ Press button A on micro:bit to start the obstacle avoidance program.
 ├── stubs/
 │   └── microbit.pyi         # Type hints for Zed editor
 ├── Makefile                 # Build automation
+├── build.py                 # Minification build script
+├── build/                   # Minified output (generated)
 ├── flash_microbit.sh        # Auto-mount and flash utility
 └── README.md                # This file
 ```
@@ -179,10 +181,23 @@ version = robot.get_version()  # STM8 firmware version
 
 ## Makefile Commands
 
-### Development
+### Build & Deploy (Minified)
+
+The project includes a build system that minifies Python files before deployment, reducing file size while keeping source code readable.
 
 ```bash
-make all          # Flash main.py + upload libraries
+make build        # Minify src/ files to build/ directory
+make deploy       # Build, flash, and upload minified files
+```
+
+**Requirements:** `pip install python-minifier`
+
+The minification typically reduces file sizes by 40-60%, which helps with micro:bit's limited storage.
+
+### Development (Non-minified)
+
+```bash
+make all          # Flash main.py + upload libraries (from src/)
 make flash        # Flash main.py only
 make upload       # Upload library files
 make ls           # List files on micro:bit

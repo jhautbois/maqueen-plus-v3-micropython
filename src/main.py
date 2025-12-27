@@ -1,5 +1,6 @@
 """Obstacle Avoidance with LIDAR, Memory System & Corner Escape"""
-from microbit import display, Image, button_a, button_b, sleep, running_time
+from microbit import display, Image, button_a, button_b, sleep, running_time, microphone
+from microbit import SoundEvent
 import music
 from maqueen_plus_v3 import MaqueenPlusV3
 from laser_matrix import LaserMatrix
@@ -9,7 +10,7 @@ CRIT=150; STOP=250; SLOW=400; SAFE=600
 # Speed
 SPD_MIN=100; SPD_MAX=180; TSPD=100; RSPD=70
 # Memory
-HIST_SZ=8; STUCK_MS=4000; ESC_TURN=500; ESC_REV=400
+HIST_SZ=8; STUCK_MS=4000; ESC_TURN=300; ESC_REV=300; ESC_FWD=400
 
 SP=[(0,0),(2,0),(5,0),(7,0),(0,2),(2,2),(5,2),(7,2),
     (3,3),(4,3),(3,4),(4,4),(0,5),(2,5),(5,5),(7,5),
@@ -39,10 +40,11 @@ class App:
         self.r.underglow('all',0,255,0)
         # State
         self.on=False; self.mv=False; self.la="s"
+        self.clap_ok=0  # Time when clap detection becomes active
         # Memory system
         self.hist=[0]*HIST_SZ; self.hidx=0
         self.last_prog=0; self.stuck_cnt=0
-        self.escaping=False; self.esc_dir=1; self.esc_start=0
+        self.esc_dir=1; self.esc_end=0
         display.show(Image.HAPPY)
         print("Ready A=go")
 
@@ -146,31 +148,57 @@ class App:
         else: c=(0,255,0)
         self.r.underglow('all',*c)
 
+    def quick_center(self):
+        """Quick center distance check (4 points only)"""
+        ds=[]
+        for x,y in [(3,3),(4,3),(3,4),(4,4)]:
+            d=self.l.read_point(x,y)
+            if d>0: ds.append(d)
+        return sum(ds)//len(ds) if ds else 4000
+
     def move(self,d,cf,z):
         t=running_time()
         c=z['c']
 
-        # Escape mode active?
-        if self.escaping:
-            dur=ESC_TURN*min(self.stuck_cnt,3)
-            if t-self.esc_start<dur:
-                self.r.turn(self.esc_dir*TSPD)
-                self.leds(0,"esc")
+        # Grace period: drive but still check obstacles!
+        if t<self.esc_end:
+            if c<CRIT:
+                # Critical obstacle during grace - stop immediately
+                self.r.stop(); self.leds(0,"rv")
+                self.esc_end=0  # Exit grace period
                 return True
-            self.escaping=False
-            self.hist=[0]*HIST_SZ; self.hidx=0
+            elif c<STOP:
+                # Close obstacle - slow turn
+                td=1 if d>=0 else -1
+                self.r.turn(td*TSPD//2)
+                self.leds(cf,"t")
+            else:
+                self.r.drive(SPD_MIN)
+                self.leds(0.5,"dr")
+            return True
 
-        # Check if stuck
+        # Check if stuck (only if not recently escaped)
         if self.is_stuck(t):
             self.stuck_cnt+=1
-            self.escaping=True
-            self.esc_start=t
             self.esc_dir=self.calc_esc(z)
-            print("STUCK! esc="+str(self.esc_dir))
-            music.pitch(600,200)
+            print("STUCK#"+str(self.stuck_cnt)+" esc="+str(self.esc_dir))
+            music.pitch(600,150)
+            # Escape: reverse (safe, nothing behind usually)
             self.r.drive(-RSPD); self.leds(0,"esc")
-            sleep(ESC_REV*min(self.stuck_cnt,3))
+            sleep(ESC_REV+self.stuck_cnt*100)
+            # Turn
             self.r.turn(self.esc_dir*TSPD)
+            sleep(ESC_TURN+self.stuck_cnt*50)
+            # Forward with sensor checks (incremental)
+            for _ in range(4):
+                qc=self.quick_center()
+                if qc<CRIT:
+                    self.r.stop(); break
+                self.r.drive(SPD_MIN); sleep(100)
+            # Reset history and set grace period
+            self.hist=[0]*HIST_SZ; self.hidx=0
+            self.last_prog=running_time()
+            self.esc_end=running_time()+1000  # 1s grace
             self.la="esc"
             return True
 
@@ -215,10 +243,19 @@ class App:
         return True
 
     def btn(self):
+        t=running_time()
+        # Clap to stop (only after 2s delay)
+        if self.on and t>self.clap_ok and microphone.was_event(SoundEvent.LOUD):
+            self.on=False; self.r.stop()
+            music.pitch(1000,100); music.pitch(800,100)
+            display.show(Image.ASLEEP); sleep(500)
+            return
         if button_a.was_pressed():
             self.on=not self.on
             if self.on:
-                self.last_prog=running_time()
+                self.last_prog=t
+                self.clap_ok=t+2000  # Enable clap after 2s
+                microphone.was_event(SoundEvent.LOUD)  # Clear pending events
                 display.show(Image.YES)
             else:
                 self.r.stop(); display.show(Image.NO)
