@@ -1,0 +1,75 @@
+/*
+ * Device Tree Overlay for Proximity LED Visualization
+ *
+ * Enables:
+ *   - SEN0628 LIDAR on external I2C (0x33)
+ *   - Maqueen motor controller for headlights (0x10)
+ *   - WS2812 underglow LEDs on P1
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/led/led.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+&pinctrl {
+	i2c1_default: i2c1_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 0)>,
+				<NRF_PSEL(TWIM_SCL, 0, 26)>;
+		};
+	};
+
+	i2c1_sleep: i2c1_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 0)>,
+				<NRF_PSEL(TWIM_SCL, 0, 26)>;
+			low-power-enable;
+		};
+	};
+};
+
+/ {
+	aliases {
+		led-strip = &underglow;
+		lidar = &lidar;
+		maqueen = &maqueen;
+	};
+
+	underglow: ws2812 {
+		compatible = "worldsemi,ws2812-gpio";
+		chain-length = <4>;
+		/* Standard WS2812 GRB order */
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		/* Timing in NOPs - tuned for 4 LED chain on nRF52833 */
+		delay-t1h = <50>;
+		delay-t1l = <45>;
+		delay-t0h = <25>;
+		delay-t0l = <55>;
+		reset-delay = <80>;
+		gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c1 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c1_default>;
+	pinctrl-1 = <&i2c1_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	lidar: sen0628@33 {
+		compatible = "dfrobot,sen0628";
+		reg = <0x33>;
+		initial-mode = <4>;
+	};
+
+	maqueen: maqueen@10 {
+		compatible = "dfrobot,maqueen-motor";
+		reg = <0x10>;
+	};
+};
