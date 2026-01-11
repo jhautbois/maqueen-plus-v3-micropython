@@ -12,15 +12,35 @@ LOG_MODULE_REGISTER(maqueen, LOG_LEVEL_INF);
 int maqueen_init(const struct device *i2c_dev)
 {
 	uint8_t version;
+	uint8_t reset_cmd[2] = { 0x49, 0x01 };
 	int ret;
+	int retries = 10;
 
 	if (!device_is_ready(i2c_dev)) {
 		LOG_ERR("I2C device not ready");
 		return -ENODEV;
 	}
 
-	/* Try to read version to verify communication */
-	ret = maqueen_get_version(i2c_dev, &version);
+	/* Send reset command (from MakeCode library) */
+	ret = i2c_write(i2c_dev, reset_cmd, sizeof(reset_cmd), MAQUEEN_I2C_ADDR);
+	if (ret < 0) {
+		LOG_WRN("Reset command failed: %d (continuing anyway)", ret);
+	} else {
+		LOG_DBG("Reset command sent");
+	}
+
+	/* Wait for STM8 to initialize */
+	k_msleep(100);
+
+	/* Poll version register until ready */
+	while (retries-- > 0) {
+		ret = maqueen_get_version(i2c_dev, &version);
+		if (ret == 0 && version != 0) {
+			break;
+		}
+		k_msleep(50);
+	}
+
 	if (ret < 0) {
 		LOG_ERR("Failed to communicate with Maqueen at 0x%02x", MAQUEEN_I2C_ADDR);
 		return ret;
@@ -30,6 +50,9 @@ int maqueen_init(const struct device *i2c_dev)
 
 	/* Stop all motors on init */
 	maqueen_stop_all(i2c_dev);
+
+	/* Clear encoder counters */
+	maqueen_encoder_clear(i2c_dev);
 
 	return 0;
 }
@@ -90,25 +113,56 @@ int maqueen_headlight_set(const struct device *i2c_dev,
 int maqueen_encoder_read(const struct device *i2c_dev,
                          uint8_t motor, int16_t *count)
 {
-	uint8_t reg;
-	uint8_t buf[2];
+	uint8_t reg = MAQUEEN_REG_ENCODER_L;  /* Read both encoders at once */
+	uint8_t buf[4];
 	int ret;
 
-	if (motor == MAQUEEN_MOTOR_LEFT) {
-		reg = MAQUEEN_REG_ENCODER_L;
-	} else if (motor == MAQUEEN_MOTOR_RIGHT) {
-		reg = MAQUEEN_REG_ENCODER_R;
-	} else {
-		return -EINVAL;
-	}
-
-	ret = i2c_write_read(i2c_dev, MAQUEEN_I2C_ADDR, &reg, 1, buf, 2);
+	/*
+	 * Read 4 bytes from register 0x04 (like Arduino library):
+	 * buf[0:1] = left encoder (big-endian)
+	 * buf[2:3] = right encoder (big-endian)
+	 */
+	ret = i2c_write(i2c_dev, &reg, 1, MAQUEEN_I2C_ADDR);
 	if (ret < 0) {
 		return ret;
 	}
 
-	/* Little-endian 16-bit value */
-	*count = (int16_t)(buf[0] | (buf[1] << 8));
+	ret = i2c_read(i2c_dev, buf, 4, MAQUEEN_I2C_ADDR);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Big-endian 16-bit values (as per Arduino library) */
+	if (motor == MAQUEEN_MOTOR_LEFT) {
+		*count = (int16_t)((buf[0] << 8) | buf[1]);
+	} else if (motor == MAQUEEN_MOTOR_RIGHT) {
+		*count = (int16_t)((buf[2] << 8) | buf[3]);
+	} else {
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+int maqueen_speed_read(const struct device *i2c_dev,
+                       uint8_t *left, uint8_t *right)
+{
+	uint8_t reg = MAQUEEN_REG_SPEED;
+	uint8_t buf[2];
+	int ret;
+
+	ret = i2c_write(i2c_dev, &reg, 1, MAQUEEN_I2C_ADDR);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = i2c_read(i2c_dev, buf, 2, MAQUEEN_I2C_ADDR);
+	if (ret < 0) {
+		return ret;
+	}
+
+	*left = buf[0];
+	*right = buf[1];
 
 	return 0;
 }

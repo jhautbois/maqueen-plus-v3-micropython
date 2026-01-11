@@ -17,8 +17,9 @@
 /* Motor registers */
 #define MAQUEEN_REG_MOTOR_LEFT  0x00
 #define MAQUEEN_REG_MOTOR_RIGHT 0x02
-#define MAQUEEN_REG_ENCODER_L   0x04
-#define MAQUEEN_REG_ENCODER_R   0x06
+#define MAQUEEN_REG_ENCODER_L   0x04  /* Not used on V3 */
+#define MAQUEEN_REG_ENCODER_R   0x06  /* Not used on V3 */
+#define MAQUEEN_REG_SPEED       0x4C  /* Real-time speed (V3) */
 #define MAQUEEN_REG_CLEAR_ENC   0x08
 #define MAQUEEN_REG_HEADLIGHT_L 0x0B
 #define MAQUEEN_REG_HEADLIGHT_R 0x0C
@@ -91,7 +92,7 @@ int maqueen_headlight_set(const struct device *i2c_dev,
                           uint8_t headlight, uint8_t color);
 
 /**
- * @brief Read encoder value
+ * @brief Read encoder value (V2 only - returns 0 on V3)
  *
  * @param i2c_dev I2C device handle
  * @param motor MAQUEEN_MOTOR_LEFT or MAQUEEN_MOTOR_RIGHT
@@ -100,6 +101,17 @@ int maqueen_headlight_set(const struct device *i2c_dev,
  */
 int maqueen_encoder_read(const struct device *i2c_dev,
                          uint8_t motor, int16_t *count);
+
+/**
+ * @brief Read real-time wheel speed (V3)
+ *
+ * @param i2c_dev I2C device handle
+ * @param left Pointer to store left speed (raw value, divide by 5 for cm/s)
+ * @param right Pointer to store right speed (raw value, divide by 5 for cm/s)
+ * @return 0 on success, negative errno on failure
+ */
+int maqueen_speed_read(const struct device *i2c_dev,
+                       uint8_t *left, uint8_t *right);
 
 /**
  * @brief Clear encoder counters
