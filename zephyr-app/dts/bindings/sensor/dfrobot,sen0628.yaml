@@ -1,0 +1,26 @@
+# DFRobot SEN0628 8x8 ToF Matrix Sensor
+#
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  DFRobot SEN0628 8x8 Time-of-Flight Matrix Sensor.
+
+  The sensor uses a VL53L7CX chip with an RP2040 host processor
+  that provides a simplified I2C interface. Supports 4x4 or 8x8
+  resolution modes with 60-degree diagonal field of view.
+
+compatible: "dfrobot,sen0628"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  initial-mode:
+    type: int
+    default: 8
+    description: |
+      Initial matrix mode after driver initialization.
+      4 = 4x4 matrix (16 zones, faster)
+      8 = 8x8 matrix (64 zones, higher resolution)
+    enum:
+      - 4
+      - 8

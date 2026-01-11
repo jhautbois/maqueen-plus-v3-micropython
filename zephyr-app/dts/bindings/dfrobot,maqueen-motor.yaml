@@ -1,0 +1,24 @@
+# Device tree binding for DFRobot Maqueen motor controller
+#
+# This is the STM8 microcontroller on the Maqueen Plus V3 that handles:
+# - DC motor control (left/right)
+# - Headlight LEDs
+# - Wheel encoders
+#
+# I2C Protocol:
+#   Address: 0x10
+#   Motor Left:  reg 0x00 [direction, speed]
+#   Motor Right: reg 0x02 [direction, speed]
+#   Headlights:  reg 0x0B/0x0C [color index 0-7]
+#   Encoders:    reg 0x04-0x07 [16-bit counters]
+
+description: DFRobot Maqueen Plus V3 motor controller (STM8)
+
+compatible: "dfrobot,maqueen-motor"
+
+include: i2c-device.yaml
+
+properties:
+  reg:
+    required: true
+    description: I2C address (always 0x10 for Maqueen)

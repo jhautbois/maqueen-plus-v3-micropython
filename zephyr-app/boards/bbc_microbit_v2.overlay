@@ -1,0 +1,99 @@
+/*
+ * Device Tree Overlay for BBC micro:bit V2 + DFRobot Maqueen Plus V3
+ *
+ * Hardware connections:
+ *   - I2C 0x10: STM8 motor controller (motors, headlights, encoders)
+ *   - I2C 0x33: SEN0628 ToF LIDAR (optional)
+ *   - P1 (gpio0.3): WS2812 underglow LEDs (4 LEDs)
+ *   - P13 (gpio0.17): Left line sensor
+ *   - P14 (gpio0.1): Right line sensor
+ *
+ * Note: micro:bit V2 has TWO I2C buses:
+ *   - i2c0: Internal (P0.16/P0.8) - on-board sensors (LSM303AGR)
+ *   - i2c1: External (P19/P20 = P0.26/P1.0) - edge connector (Maqueen)
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/led/led.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+/* Pin control for external I2C on edge connector */
+&pinctrl {
+	i2c1_default: i2c1_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 0)>,   /* P20 = P1.0 */
+				<NRF_PSEL(TWIM_SCL, 0, 26)>;  /* P19 = P0.26 */
+		};
+	};
+
+	i2c1_sleep: i2c1_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 0)>,
+				<NRF_PSEL(TWIM_SCL, 0, 26)>;
+			low-power-enable;
+		};
+	};
+};
+
+/ {
+	aliases {
+		led-strip = &underglow;
+		motor-controller = &maqueen;
+		/* Add alias for external I2C */
+		i2c-ext = &i2c1;
+	};
+
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+	};
+
+	/* WS2812 underglow LEDs on P1 */
+	underglow: ws2812 {
+		compatible = "worldsemi,ws2812-gpio";
+		chain-length = <4>;
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		/* P1 = gpio0 pin 3 */
+		gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+	};
+
+	/* Line following sensors */
+	zephyr,user {
+		/* P13 = gpio0 pin 17, P14 = gpio0 pin 1 */
+		left-line-gpios = <&edge_connector 13 GPIO_ACTIVE_HIGH>;
+		right-line-gpios = <&edge_connector 14 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* Internal I2C (on-board sensors) - keep default config */
+&i2c0 {
+	status = "okay";
+};
+
+/* External I2C on edge connector (P19/P20) - for Maqueen */
+&i2c1 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;  /* 100kHz */
+	pinctrl-0 = <&i2c1_default>;
+	pinctrl-1 = <&i2c1_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/* Maqueen Plus V3 STM8 motor controller */
+	maqueen: maqueen@10 {
+		compatible = "dfrobot,maqueen-motor";
+		reg = <0x10>;
+		label = "MAQUEEN";
+	};
+
+	/* SEN0628 8x8 ToF LIDAR (optional - uncomment when driver exists)
+	lidar: sen0628@33 {
+		compatible = "dfrobot,sen0628";
+		reg = <0x33>;
+		label = "LIDAR";
+		initial-mode = <8>;
+	};
+	*/
+};

@@ -1,0 +1,54 @@
+# SEN0628 8x8 ToF LIDAR Sensor Driver
+
+menuconfig SEN0628
+	bool "DFRobot SEN0628 8x8 ToF Matrix Sensor"
+	default y
+	depends on I2C
+	help
+	  Enable driver for DFRobot SEN0628 8x8 Matrix ToF LIDAR sensor.
+	  This sensor uses a VL53L7CX ToF chip with an RP2040 host processor
+	  that provides a simplified I2C interface.
+
+if SEN0628
+
+config SEN0628_INIT_PRIORITY
+	int "Init priority"
+	default 80
+	help
+	  Device driver initialization priority.
+
+config SEN0628_DEFAULT_MODE
+	int "Default matrix mode (4 or 8)"
+	default 8
+	range 4 8
+	help
+	  Initial matrix mode after driver initialization.
+	  4 = 4x4 matrix (16 zones, faster)
+	  8 = 8x8 matrix (64 zones, higher resolution)
+
+config SEN0628_READ_DELAY_MS
+	int "Delay between point reads (ms)"
+	default 10
+	range 5 100
+	help
+	  Delay in milliseconds after sending a point read command
+	  before reading the response. Benchmark shows 10ms is reliable.
+	  Lower values (5ms) may work but increase risk of read errors.
+
+config SEN0628_MODE_SETTLE_MS
+	int "Mode change settling time (ms)"
+	default 5000
+	range 1000 10000
+	help
+	  Time to wait after changing matrix mode for sensor to stabilize.
+	  The sensor requires approximately 5 seconds after mode change.
+
+config SEN0628_LOG_LEVEL
+	int "Log level"
+	default 3
+	range 0 4
+	help
+	  Log level for SEN0628 driver.
+	  0 = Off, 1 = Error, 2 = Warning, 3 = Info, 4 = Debug
+
+endif # SEN0628

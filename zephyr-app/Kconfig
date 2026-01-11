@@ -1,0 +1,11 @@
+# Top-level Kconfig for zephyr-app
+#
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "Maqueen Plus V3 Zephyr Application"
+
+# Include Zephyr Kconfig
+source "Kconfig.zephyr"
+
+# Include local driver Kconfigs
+rsource "drivers/sen0628/Kconfig"
