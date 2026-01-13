@@ -1,0 +1,155 @@
+/*
+ * Odometry module for Maqueen Plus V3
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "odometry.h"
+#include "maqueen.h"
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+
+LOG_MODULE_REGISTER(odometry, LOG_LEVEL_INF);
+
+/* Precomputed constants to avoid floating point */
+/* sin/cos lookup table for 0-90 degrees, scaled by 1000 */
+static const int16_t sin_table[] = {
+	0, 17, 35, 52, 70, 87, 105, 122, 139, 156,      /* 0-9 */
+	174, 191, 208, 225, 242, 259, 276, 292, 309, 326, /* 10-19 */
+	342, 358, 375, 391, 407, 423, 438, 454, 469, 485, /* 20-29 */
+	500, 515, 530, 545, 559, 574, 588, 602, 616, 629, /* 30-39 */
+	643, 656, 669, 682, 695, 707, 719, 731, 743, 755, /* 40-49 */
+	766, 777, 788, 799, 809, 819, 829, 839, 848, 857, /* 50-59 */
+	866, 875, 883, 891, 899, 906, 914, 921, 927, 934, /* 60-69 */
+	940, 946, 951, 956, 961, 966, 970, 974, 978, 982, /* 70-79 */
+	985, 988, 990, 993, 995, 996, 998, 999, 999, 1000, /* 80-89 */
+	1000 /* 90 */
+};
+
+/* Get sin value scaled by 1000 */
+static int32_t sin_mdeg(int32_t mdeg)
+{
+	int32_t deg = mdeg / 1000;
+	int32_t sign = 1;
+
+	/* Normalize to 0-360 */
+	while (deg < 0) deg += 360;
+	while (deg >= 360) deg -= 360;
+
+	/* Map to 0-90 range */
+	if (deg > 270) {
+		deg = 360 - deg;
+		sign = -1;
+	} else if (deg > 180) {
+		deg = deg - 180;
+		sign = -1;
+	} else if (deg > 90) {
+		deg = 180 - deg;
+	}
+
+	return sign * sin_table[deg];
+}
+
+/* Get cos value scaled by 1000 */
+static int32_t cos_mdeg(int32_t mdeg)
+{
+	return sin_mdeg(mdeg + 90000);
+}
+
+void odometry_init(struct odometry *odom, const struct device *i2c_dev)
+{
+	odom->i2c_dev = i2c_dev;
+	odometry_reset(odom);
+	LOG_INF("Odometry initialized (wheelbase=%dmm)", ODOM_WHEELBASE_MM);
+}
+
+void odometry_reset(struct odometry *odom)
+{
+	odom->x = 0;
+	odom->y = 0;
+	odom->heading_mdeg = 0;
+	odom->dist_left = 0;
+	odom->dist_right = 0;
+	odom->dir_left = 1;
+	odom->dir_right = 1;
+	odom->last_update_ms = k_uptime_get();
+	LOG_INF("Odometry reset");
+}
+
+void odometry_set_direction(struct odometry *odom,
+			    bool left_forward, bool right_forward)
+{
+	odom->dir_left = left_forward ? 1 : -1;
+	odom->dir_right = right_forward ? 1 : -1;
+}
+
+int odometry_update(struct odometry *odom)
+{
+	uint8_t speed_left, speed_right;
+	int64_t now_ms;
+	int32_t dt_ms;
+	int32_t v_left_mm_s, v_right_mm_s;
+	int32_t d_left, d_right;
+	int32_t d_center, d_theta_mdeg;
+	int ret;
+
+	/* Read current speed */
+	ret = maqueen_speed_read(odom->i2c_dev, &speed_left, &speed_right);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Calculate time delta */
+	now_ms = k_uptime_get();
+	dt_ms = (int32_t)(now_ms - odom->last_update_ms);
+	odom->last_update_ms = now_ms;
+
+	if (dt_ms <= 0 || dt_ms > 1000) {
+		/* Skip invalid intervals */
+		return 0;
+	}
+
+	/* Convert speed to mm/s (raw / 5 = cm/s, * 10 = mm/s) */
+	/* Apply direction sign to get signed velocity */
+	v_left_mm_s = (speed_left * 10 * odom->dir_left) / ODOM_SPEED_DIVISOR;
+	v_right_mm_s = (speed_right * 10 * odom->dir_right) / ODOM_SPEED_DIVISOR;
+
+	/* Calculate distance traveled this interval (mm) - signed */
+	d_left = (v_left_mm_s * dt_ms) / 1000;
+	d_right = (v_right_mm_s * dt_ms) / 1000;
+
+	/* Accumulate total distance */
+	odom->dist_left += d_left;
+	odom->dist_right += d_right;
+
+	/* Differential drive kinematics */
+	/* d_center = average distance */
+	d_center = (d_left + d_right) / 2;
+
+	/* d_theta = (d_right - d_left) / wheelbase (in radians) */
+	/* Convert to millidegrees: rad * 180000 / pi ≈ rad * 57296 */
+	/* d_theta_mdeg = (d_right - d_left) * 57296 / wheelbase */
+	d_theta_mdeg = ((d_right - d_left) * 57296) / ODOM_WHEELBASE_MM;
+
+	/* Update heading */
+	odom->heading_mdeg += d_theta_mdeg;
+
+	/* Normalize heading to 0-360000 */
+	while (odom->heading_mdeg < 0) {
+		odom->heading_mdeg += 360000;
+	}
+	while (odom->heading_mdeg >= 360000) {
+		odom->heading_mdeg -= 360000;
+	}
+
+	/* Update position using mid-point heading */
+	/* Use heading at midpoint of arc for better accuracy */
+	int32_t mid_heading = odom->heading_mdeg - d_theta_mdeg / 2;
+
+	/* dx = d_center * cos(heading), dy = d_center * sin(heading) */
+	/* cos/sin are scaled by 1000, so divide result by 1000 */
+	odom->x += (d_center * cos_mdeg(mid_heading)) / 1000;
+	odom->y += (d_center * sin_mdeg(mid_heading)) / 1000;
+
+	return 0;
+}

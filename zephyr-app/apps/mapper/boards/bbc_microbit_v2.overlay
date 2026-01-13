@@ -1,0 +1,56 @@
+/*
+ * Device tree overlay for Mapper application
+ *
+ * Uses the default storage partition (24KB at 0x7a000)
+ * Configures I2C1 on edge connector for external sensors
+ * Defines SEN0628 LIDAR device
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+/*
+ * I2C1 on edge connector for external sensors
+ * P19 = SCL (P0.26)
+ * P20 = SDA (P1.00)
+ */
+&pinctrl {
+    i2c1_default: i2c1_default {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 1, 0)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 26)>;
+        };
+    };
+
+    i2c1_sleep: i2c1_sleep {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 1, 0)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 26)>;
+            low-power-enable;
+        };
+    };
+};
+
+/ {
+    aliases {
+        lidar = &lidar;
+        i2c-ext = &i2c1;
+    };
+};
+
+&i2c1 {
+    compatible = "nordic,nrf-twim";
+    status = "okay";
+    pinctrl-0 = <&i2c1_default>;
+    pinctrl-1 = <&i2c1_sleep>;
+    pinctrl-names = "default", "sleep";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+
+    /* SEN0628 8x8 ToF LIDAR at 0x33 */
+    lidar: sen0628@33 {
+        compatible = "dfrobot,sen0628";
+        reg = <0x33>;
+        initial-mode = <4>;  /* 4x4 mode for faster scans */
+    };
+};

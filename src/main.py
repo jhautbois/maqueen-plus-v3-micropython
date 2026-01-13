@@ -1,260 +1,311 @@
-"""Obstacle Avoidance with Polar Map Navigation"""
-from microbit import display, Image, button_a, button_b, sleep, running_time
+"""Navigation V2 - Anti-oscillation et echappement de coins"""
+from microbit import display, Image, button_a, button_b, sleep, running_time, accelerometer
+from micropython import const, mem_info
+import gc
 import music
 from maqueen_plus_v3 import MaqueenPlusV3
 from laser_matrix import LaserMatrix
+from gap_finder import GapFinder
+from fall_detector import FallDetector
+from micro_slam import MicroSLAM
 
-# Thresholds (mm)
-CRIT=120; STOP=200; SLOW=350; SAFE=500
+# Seuils (mm)
+_CRIT = const(120)
+_STOP = const(200)
+_SLOW = const(350)
+_SAFE = const(500)
 
-# Speed settings
-SPD_MIN=80; SPD_MAX=160; TSPD=90; RSPD=60
+# Vitesses
+_SPD_MIN = const(80)
+_SPD_MAX = const(160)
+_TSPD = const(90)
+_ESCAPE_SPD = const(80)
 
-# Polar map: 8 sectors, each ~7.5° (total FOV 60°)
-# Sector angles: -26, -19, -11, -4, 4, 11, 19, 26 degrees
-SECT_ANG = [-26, -19, -11, -4, 4, 11, 19, 26]
+# Timing
+_CYCLE_MS = const(80)
+_ESCAPE_COOLDOWN = const(2000)
 
-def d2b(d):
-    """Distance to brightness for display"""
-    if d<200: return 9
-    if d<400: return 7
-    if d<600: return 5
-    if d<1000: return 3
-    if d<1500: return 1
-    return 0
 
-class App:
+class NavV2:
     def __init__(self):
         display.show(Image.HEART)
         self.r = MaqueenPlusV3()
         self.l = LaserMatrix(0x33)
         self.l.set_mode(8)
-        # LED test
-        print("Polar Nav v1.0")
-        self.r.headlights('red','red'); sleep(300)
-        self.r.headlights('green','green'); sleep(300)
-        self.r.headlights('white','white')
-        self.r.underglow('all',0,255,0)
-        # State
+
+        self.gap = GapFinder()
+
+        self.fall = FallDetector(enable_cliff=True)
+        self.danger_lockout = 0
+
+        # SLAM (odometrie + grille 8x8)
+        self.slam = MicroSLAM()
+
+        # Test LEDs
+        print("Nav V2")
+        self.r.headlights('red', 'red')
+        sleep(300)
+        self.r.headlights('green', 'green')
+        sleep(300)
+        self.r.headlights('white', 'white')
+        self.r.underglow('all', 0, 255, 0)
+
+        # Etat
         self.on = False
+        self.last_escape = 0
+        self.escape_count = 0
+        self.ml = 0  # Derniere commande moteur gauche
+        self.mr = 0  # Derniere commande moteur droite
+
         display.show(Image.HAPPY)
+        # Diagnostic memoire
+        gc.collect()
+        free = gc.mem_free()
+        alloc = gc.mem_alloc()
+        print("RAM: " + str(alloc) + "/" + str(alloc + free) + " (" + str(free) + " free)")
         print("Ready A=go")
 
-    def read_matrix(self):
-        """Read full 8x8 LIDAR matrix"""
+    def read_lidar_cols(self):
+        """Lire LIDAR et retourner 8 colonnes (min par colonne)"""
         m = self.l.read_matrix()
-        p = {}
-        if m:
-            for y in range(8):
-                for x in range(8):
-                    d = m[y*8+x]
-                    p[(x,y)] = d if 0 < d < 4000 else 4000
-        return p
+        if not m:
+            return None
 
-    def polar(self, p):
-        """Convert 8x8 matrix to 8 polar sectors (min distance per sector)"""
-        # Each column maps to a sector (0-7)
-        # For each sector, find minimum distance (closest obstacle)
-        sectors = [4000] * 8
+        cols = []
         for x in range(8):
             col_min = 4000
             for y in range(8):
-                d = p.get((x, y), 4000)
-                if d < col_min:
+                d = m[y * 8 + x]
+                if 0 < d < col_min:
                     col_min = d
-            sectors[x] = col_min
-        return sectors
+            cols.append(col_min)
+        return cols
 
-    def find_gap(self, sectors):
-        """Find best gap (direction with most space)
-        Returns: (sector_index, distance, gap_width)
-        """
-        # Find the sector with maximum distance
-        best_idx = 3  # Default: center-left
-        best_dist = 0
-
-        # Check each sector and its neighbors for a "gap"
-        for i in range(8):
-            # Average with neighbors for smoother detection
-            d = sectors[i]
-            if i > 0:
-                d = (d + sectors[i-1]) // 2
-            if i < 7:
-                d = (d + sectors[i+1]) // 2
-
-            if d > best_dist:
-                best_dist = d
-                best_idx = i
-
-        # Calculate gap width (how many adjacent sectors are also clear)
-        width = 1
-        thresh = best_dist * 0.7  # 70% of best distance
-        # Check left
-        for i in range(best_idx - 1, -1, -1):
-            if sectors[i] >= thresh:
-                width += 1
-            else:
-                break
-        # Check right
-        for i in range(best_idx + 1, 8):
-            if sectors[i] >= thresh:
-                width += 1
-            else:
-                break
-
-        return (best_idx, best_dist, width)
-
-    def sector_to_angle(self, idx):
-        """Convert sector index to angle in degrees"""
-        # Sector 0 = left (-26°), Sector 7 = right (+26°)
-        # Center is between 3 and 4 (around 0°)
-        return SECT_ANG[idx] if idx < 8 else 0
-
-    def disp(self, p):
-        """Display LIDAR on 5x5 matrix"""
-        rows = []
-        for dy in range(5):
-            row = ""
-            for dx in range(5):
-                lx, ly = int((4-dx)*1.6), int((4-dy)*1.6)
-                ds = []
-                for i in range(2):
-                    for j in range(2):
-                        k = (min(lx+i,7), min(ly+j,7))
-                        if k in p:
-                            ds.append(p[k])
-                row += str(d2b(sum(ds)//len(ds) if ds else 4000))
-            rows.append(row)
-        display.show(Image(":".join(rows)))
+    def mot(self, l, r):
+        """Wrapper moteur avec tracking"""
+        self.ml = l
+        self.mr = r
+        self.r.motors(l, r)
 
     def leds(self, state):
-        """Update LEDs based on state"""
-        if state == "rev":
+        """Mettre a jour LEDs selon etat"""
+        if state == "danger":
+            self.r.underglow('all', 255, 0, 255)  # Magenta = danger
+            self.r.headlights('purple', 'purple')
+        elif state == "escape":
             self.r.underglow('all', 255, 0, 0)
+            self.r.headlights('red', 'red')
         elif state == "turn":
             self.r.underglow('all', 0, 0, 255)
+            self.r.headlights('blue', 'blue')
         elif state == "slow":
             self.r.underglow('all', 255, 150, 0)
+            self.r.headlights('yellow', 'yellow')
         else:  # drive
             self.r.underglow('all', 0, 255, 0)
+            self.r.headlights('white', 'white')
 
-    def nav(self, sectors):
-        """Navigate using polar map"""
-        # Get center distance (average of sectors 3,4)
-        center = (sectors[3] + sectors[4]) // 2
+    def escape_corner(self, gap_angle):
+        """Echappement de coin avec detection obstacles"""
+        self.last_escape = running_time()
+        self.escape_count += 1
+        self.leds("escape")
+        music.pitch(600, 100)
 
-        # Find best gap
-        gap_idx, gap_dist, gap_width = self.find_gap(sectors)
-        gap_angle = self.sector_to_angle(gap_idx)
+        # 1. Reculer brievement (pas de LIDAR arriere)
+        self.mot(-_ESCAPE_SPD, -_ESCAPE_SPD)
+        sleep(400)
+        self.mot(0, 0)
+        sleep(50)
 
-        # Debug
-        # print("C:" + str(center) + " Gap:" + str(gap_idx) + " A:" + str(gap_angle) + " D:" + str(gap_dist))
+        # 2. Tourner vers le passage
+        if abs(gap_angle) < 15:
+            angle = 60 if self.escape_count % 2 == 0 else -60
+        else:
+            angle = gap_angle * 1.5
+            angle = max(-90, min(90, angle))
 
-        # Critical: reverse if too close
-        if center < CRIT:
-            music.pitch(800, 50)
-            self.r.drive(-RSPD)
-            self.leds("rev")
-            sleep(300)
-            # Turn toward gap
-            if gap_angle < 0:
-                self.r.turn(-TSPD)
+        if angle > 0:
+            self.mot(-_TSPD, _TSPD)
+        else:
+            self.mot(_TSPD, -_TSPD)
+        sleep(int(abs(angle) * 5))
+        self.mot(0, 0)
+        sleep(50)
+
+        # 3. Avancer avec detection d'obstacles
+        self.mot(_SPD_MIN, _SPD_MIN)
+        for _ in range(6):  # 6 x 50ms = 300ms max
+            sleep(50)
+            cols = self.read_lidar_cols()
+            if cols:
+                center = (cols[3] + cols[4]) // 2
+                if center < _CRIT:
+                    break
+        self.mot(0, 0)
+        self.gap.reset()
+
+    def nav(self, cols):
+        """Navigation principale"""
+        # Utiliser colonnes LIDAR directement (8 colonnes = 8 secteurs)
+        # cols[0]=gauche, cols[7]=droite, cols[3-4]=centre
+
+        # Trouver meilleur passage avec les colonnes LIDAR
+        gap_offset, gap_dist, gap_angle = self.gap.find_gap(cols)
+
+        # Distance centre (moyenne colonnes 3,4)
+        center = (cols[3] + cols[4]) // 2
+
+        # Debug occasionnel
+        # if self.cycle_count == 0:
+        #     print("C:" + str(center) + " G:" + str(gap_angle))
+
+        # Critique: echappement si tres proche
+        if center < _CRIT:
+            # Verifier cooldown
+            if running_time() - self.last_escape > _ESCAPE_COOLDOWN:
+                self.escape_corner(gap_angle)
             else:
-                self.r.turn(TSPD)
-            sleep(250)
+                # Juste reculer
+                self.mot(-_ESCAPE_SPD, -_ESCAPE_SPD)
+                self.leds("escape")
             return
 
-        # Calculate turn intensity based on gap angle
-        # angle: -26 to +26, map to turn factor -1 to +1
-        turn_factor = gap_angle / 30.0  # Normalize to -0.87 to +0.87
+        # Bloque: tourner sur place
+        if center < _STOP:
+            # Comparer gauche vs droite pour decider
+            left_avg = (cols[0] + cols[1] + cols[2]) // 3
+            right_avg = (cols[5] + cols[6] + cols[7]) // 3
 
-        # If center is blocked, need stronger turn
-        if center < STOP:
-            # Pure rotation toward gap
-            if abs(turn_factor) < 0.2:
-                # Gap is roughly ahead but center blocked
-                # Check which side is better
-                left_avg = (sectors[0] + sectors[1] + sectors[2]) // 3
-                right_avg = (sectors[5] + sectors[6] + sectors[7]) // 3
-                turn_factor = -0.7 if left_avg > right_avg else 0.7
+            if abs(gap_angle) < 10:
+                # Passage devant mais bloque, choisir un cote
+                gap_angle = -30 if left_avg > right_avg else 30
 
-            # Rotate in place
-            turn_speed = int(TSPD * (0.5 + abs(turn_factor) * 0.5))
-            if turn_factor < 0:
-                self.r.turn(-turn_speed)
+            if gap_angle < 0:
+                self.mot(_TSPD, -_TSPD)
             else:
-                self.r.turn(turn_speed)
+                self.mot(-_TSPD, _TSPD)
             self.leds("turn")
             return
 
-        # Calculate speed based on distance
-        if center > SAFE:
-            spd = SPD_MAX
-        elif center > SLOW:
-            spd = SPD_MIN + int((SPD_MAX - SPD_MIN) * (center - SLOW) / (SAFE - SLOW))
+        # Calculer vitesse selon distance
+        if center > _SAFE:
+            spd = _SPD_MAX
+        elif center > _SLOW:
+            ratio = (center - _SLOW) / (_SAFE - _SLOW)
+            spd = _SPD_MIN + int((_SPD_MAX - _SPD_MIN) * ratio)
         else:
-            spd = SPD_MIN
+            spd = _SPD_MIN
 
-        # Apply differential steering based on gap angle
-        if abs(turn_factor) > 0.15:
-            # Steer toward gap
+        # Preferer aller droit si le centre est suffisamment libre
+        if center > _SLOW and abs(gap_angle) < 15:
+            # Centre OK et passage presque droit -> aller tout droit
+            self.mot(spd, spd)
+            self.leds("drive")
+            return
+
+        # Appliquer direction differentielle
+        turn_factor = gap_angle / 30.0  # Normaliser (30 deg = max)
+        turn_factor = max(-0.7, min(0.7, turn_factor))  # Limiter
+
+        if abs(turn_factor) > 0.1:
             if turn_factor < 0:
-                # Turn left: slow left wheel
-                left_spd = int(spd * (1 + turn_factor))  # turn_factor is negative
+                # Tourner gauche
+                left_spd = int(spd * (1 + turn_factor))
                 right_spd = spd
             else:
-                # Turn right: slow right wheel
+                # Tourner droite
                 left_spd = spd
                 right_spd = int(spd * (1 - turn_factor))
-            self.r.motors(left_spd, right_spd)
-            self.leds("slow" if center < SLOW else "drive")
+            self.mot(left_spd, right_spd)
+            self.leds("slow" if center < _SLOW else "drive")
         else:
-            # Go straight
-            self.r.drive(spd)
+            # Tout droit
+            self.mot(spd, spd)
             self.leds("drive")
 
+    def check_danger(self):
+        """Check for tilt/freefall/cliff danger. Returns True if danger detected."""
+        # Use fast check (accelerometer only) to save I2C bandwidth
+        # Full check with cliff detection every 4th call
+        danger, reason = self.fall.check_fast()
+
+        if danger:
+            self.mot(0, 0)
+            self.leds("danger")
+
+            # Show reason on display
+            if reason == "freefall":
+                display.show(Image.ARROW_S)
+            elif reason == "pickup":
+                display.show(Image.SURPRISED)
+            else:
+                display.show(Image.CONFUSED)
+
+            print("DANGER: " + reason)
+            self.on = False
+            self.danger_lockout = running_time() + 2000  # 2s lockout
+            return True
+
+        return False
+
     def btn(self):
-        """Handle buttons (A=start/stop, B=emergency stop)"""
+        """Gerer boutons"""
         if button_a.was_pressed():
+            # Check lockout after danger
+            if running_time() < self.danger_lockout:
+                music.pitch(200, 100)  # Low beep = still locked out
+                return
+
             self.on = not self.on
             if self.on:
                 display.clear()
+                self.escape_count = 0
+                self.slam.reset()
             else:
-                self.r.stop()
+                self.mot(0, 0)
                 display.show(Image.NO)
             sleep(300)
 
         if button_b.was_pressed():
             self.on = False
-            self.r.stop()
+            self.mot(0, 0)
             display.show(Image.SKULL)
             sleep(500)
 
     def run(self):
-        """Main loop"""
+        """Boucle principale"""
         while True:
             self.btn()
 
+            # Safety check FIRST - before any movement
+            if self.on and self.check_danger():
+                continue
+
+            cols = self.read_lidar_cols()
+
             if not self.on:
-                # Stopped: show LIDAR visualization
-                p = self.read_matrix()
-                if p:
-                    self.disp(p)
-                sleep(100)
+                # Diagnostic SLAM
+                px, py, ph = self.slam.pose()
+                print("P:" + str(px) + "," + str(py) + " H:" + str(ph))
+                sleep(2000)
                 continue
 
-            # Running: read LIDAR and navigate (no display update)
-            p = self.read_matrix()
-            if not p:
-                self.r.stop()
+            if not cols:
+                self.mot(0, 0)
                 continue
 
-            # Convert to polar and navigate
-            sectors = self.polar(p)
-            self.nav(sectors)
+            # Mise a jour SLAM avec commandes moteur
+            self.slam.update(self.ml, self.mr)
+            self.slam.lidar(cols)
+
+            # Naviguer
+            self.nav(cols)
+            sleep(_CYCLE_MS)
+
 
 try:
-    App().run()
+    NavV2().run()
 except Exception as e:
     print("ERR:" + str(e))
     display.show(Image.SAD)

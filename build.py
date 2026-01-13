@@ -16,7 +16,7 @@ SRC_DIR = Path("src")
 BUILD_DIR = Path("build")
 
 # Order matters: dependencies first
-LIB_FILES = ["laser_matrix.py", "maqueen_plus_v3.py"]
+LIB_FILES = ["laser_matrix.py", "maqueen_plus_v3.py", "gap_finder.py", "fall_detector.py", "micro_slam.py"]
 MAIN_FILE = "main.py"
 
 
@@ -27,18 +27,36 @@ def extract_imports_and_code(filepath: Path) -> tuple[set, list]:
 
     imports = set()
     code_lines = []
-    skip_until_class = False
-    in_try_block = False
+    in_docstring = False
+    docstring_char = None
 
     i = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
 
-        # Skip docstrings at file start
-        if stripped.startswith('"""') or stripped.startswith("'''"):
+        # Handle multi-line docstrings
+        if in_docstring:
+            # Look for closing quotes
+            if docstring_char in stripped:
+                in_docstring = False
+                docstring_char = None
             i += 1
             continue
+
+        # Detect start of docstring
+        if stripped.startswith('"""') or stripped.startswith("'''"):
+            docstring_char = stripped[:3]
+            # Check if it's a single-line docstring (ends on same line)
+            if stripped.count(docstring_char) >= 2:
+                # Single-line docstring - skip just this line
+                i += 1
+                continue
+            else:
+                # Multi-line docstring - skip until we find closing quotes
+                in_docstring = True
+                i += 1
+                continue
 
         # Skip try/except ImportError blocks entirely
         if stripped == 'try:' and i + 1 < len(lines):
@@ -50,8 +68,11 @@ def extract_imports_and_code(filepath: Path) -> tuple[set, list]:
 
         # Collect standard library imports
         if stripped.startswith('from microbit import') or \
+           stripped.startswith('from micropython import') or \
            stripped.startswith('import neopixel') or \
-           stripped.startswith('import music'):
+           stripped.startswith('import music') or \
+           stripped.startswith('import math') or \
+           stripped.startswith('import gc'):
             imports.add(stripped)
             i += 1
             continue
@@ -59,8 +80,14 @@ def extract_imports_and_code(filepath: Path) -> tuple[set, list]:
         # Skip local imports (we'll embed them)
         if stripped.startswith('from maqueen_plus_v3 import') or \
            stripped.startswith('from laser_matrix import') or \
+           stripped.startswith('from gap_finder import') or \
+           stripped.startswith('from fall_detector import') or \
+           stripped.startswith('from micro_slam import') or \
            stripped.startswith('import maqueen_plus_v3') or \
-           stripped.startswith('import laser_matrix'):
+           stripped.startswith('import laser_matrix') or \
+           stripped.startswith('import gap_finder') or \
+           stripped.startswith('import fall_detector') or \
+           stripped.startswith('import micro_slam'):
             i += 1
             continue
 

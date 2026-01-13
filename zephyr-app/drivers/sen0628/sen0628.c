@@ -227,8 +227,9 @@ static int send_command(const struct device *dev,
 
 /*
  * Internal: Device tree initialization callback
+ * Note: Used when CONFIG_SEN0628 is enabled with device tree instantiation
  */
-static int sen0628_dt_init(const struct device *dev)
+static int __unused sen0628_dt_init(const struct device *dev)
 {
 	const struct sen0628_config *cfg = dev->config;
 	struct sen0628_data *data = dev->data;

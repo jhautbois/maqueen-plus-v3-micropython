@@ -1,11 +1,12 @@
 /*
- * Speed Test for Maqueen Plus V3
+ * Odometry Test for Maqueen Plus V3
  *
  * V3 uses real-time speed register (0x4C) instead of encoder counts.
+ * Odometry integrates speed to calculate position and heading.
  *
  * Button A: Execute next move in sequence
  *           (forward, left, right, backward, left, right, ...)
- * Button B: Check current wheel speed
+ * Button B: Show current position and heading
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,8 +19,9 @@
 #include <zephyr/sys/util.h>
 
 #include "maqueen.h"
+#include "odometry.h"
 
-LOG_MODULE_REGISTER(encoder_test, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(odometry_test, LOG_LEVEL_INF);
 
 /* I2C device - external bus on edge connector (P19/P20) for Maqueen */
 #define I2C_EXT_NODE DT_NODELABEL(i2c1)
@@ -32,7 +34,11 @@ static const struct gpio_dt_spec button_b = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpio
 /* Test parameters */
 #define MOTOR_SPEED     100
 #define TEST_DURATION_MS 1000
-#define POLL_INTERVAL_MS 100
+#define POLL_INTERVAL_MS 50
+#define ODOM_UPDATE_MS  50
+
+/* Odometry state */
+static struct odometry odom;
 
 /* Movement types */
 enum move_type {
@@ -49,27 +55,34 @@ static const char *move_names[] = {
 
 static void do_move(enum move_type type)
 {
-	uint8_t speed_l, speed_r;
-	int samples = 0;
-	int sum_l = 0, sum_r = 0;
+	int32_t start_heading = odom.heading_mdeg;
+	int32_t start_dist = odometry_get_distance_mm(&odom);
+	int32_t start_x = odom.x;
+	int32_t start_y = odom.y;
 
 	printk("\n=== %s ===\n", move_names[type]);
+	printk("Start: x=%d y=%d heading=%d deg\n",
+	       odom.x, odom.y, odometry_get_heading_deg(&odom));
 
-	/* Execute movement */
+	/* Execute movement - set direction for odometry first! */
 	switch (type) {
 	case MOVE_FORWARD:
+		odometry_set_direction(&odom, true, true);
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_LEFT, MAQUEEN_DIR_FORWARD, MOTOR_SPEED);
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_RIGHT, MAQUEEN_DIR_FORWARD, MOTOR_SPEED);
 		break;
 	case MOVE_BACKWARD:
+		odometry_set_direction(&odom, false, false);
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_LEFT, MAQUEEN_DIR_REVERSE, MOTOR_SPEED);
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_RIGHT, MAQUEEN_DIR_REVERSE, MOTOR_SPEED);
 		break;
 	case MOVE_LEFT:
+		odometry_set_direction(&odom, false, true);  /* Left reverse, right forward */
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_LEFT, MAQUEEN_DIR_REVERSE, 80);
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_RIGHT, MAQUEEN_DIR_FORWARD, 80);
 		break;
 	case MOVE_RIGHT:
+		odometry_set_direction(&odom, true, false);  /* Left forward, right reverse */
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_LEFT, MAQUEEN_DIR_FORWARD, 80);
 		maqueen_motor_set(i2c_dev, MAQUEEN_MOTOR_RIGHT, MAQUEEN_DIR_REVERSE, 80);
 		break;
@@ -77,25 +90,29 @@ static void do_move(enum move_type type)
 		return;
 	}
 
-	/* Sample speed during movement */
-	for (int i = 0; i < 10; i++) {
-		k_msleep(100);
-		if (maqueen_speed_read(i2c_dev, &speed_l, &speed_r) == 0) {
-			printk("  speed: L=%3d R=%3d (cm/s: L=%d R=%d)\n",
-			       speed_l, speed_r, speed_l / 5, speed_r / 5);
-			sum_l += speed_l;
-			sum_r += speed_r;
-			samples++;
-		}
+	/* Update odometry during movement */
+	for (int i = 0; i < TEST_DURATION_MS / ODOM_UPDATE_MS; i++) {
+		k_msleep(ODOM_UPDATE_MS);
+		odometry_update(&odom);
 	}
 
 	maqueen_stop_all(i2c_dev);
+	odometry_set_direction(&odom, true, true);  /* Reset to forward */
 
-	if (samples > 0) {
-		printk("Avg speed: L=%d R=%d (cm/s: L=%d R=%d)\n",
-		       sum_l / samples, sum_r / samples,
-		       sum_l / samples / 5, sum_r / samples / 5);
-	}
+	/* Final odometry update */
+	k_msleep(ODOM_UPDATE_MS);
+	odometry_update(&odom);
+
+	/* Report results */
+	int32_t delta_heading = odom.heading_mdeg - start_heading;
+	int32_t delta_dist = odometry_get_distance_mm(&odom) - start_dist;
+
+	printk("End:   x=%d y=%d heading=%d deg\n",
+	       odom.x, odom.y, odometry_get_heading_deg(&odom));
+	printk("Delta: dist=%dmm, rotation=%d deg\n",
+	       delta_dist, delta_heading / 1000);
+	printk("Movement: dx=%d dy=%d\n",
+	       odom.x - start_x, odom.y - start_y);
 }
 
 /* Sequence: fwd, left, right, back, left, right, ... */
@@ -109,12 +126,12 @@ int main(void)
 {
 	int ret;
 
-	printk("\n=============================\n");
-	printk("  Maqueen Speed Test (V3)\n");
-	printk("=============================\n");
+	printk("\n==============================\n");
+	printk("  Maqueen Odometry Test (V3)\n");
+	printk("==============================\n");
 	printk("Button A: Next move in sequence\n");
 	printk("  (fwd, left, right, back, left, right)\n");
-	printk("Button B: Check current speed\n\n");
+	printk("Button B: Show position / Reset odometry\n\n");
 
 	/* Check I2C device */
 	if (!device_is_ready(i2c_dev)) {
@@ -128,6 +145,9 @@ int main(void)
 		LOG_ERR("Failed to init Maqueen: %d", ret);
 		return ret;
 	}
+
+	/* Initialize odometry */
+	odometry_init(&odom, i2c_dev);
 
 	/* Configure buttons */
 	if (!gpio_is_ready_dt(&button_a) || !gpio_is_ready_dt(&button_b)) {
@@ -148,13 +168,15 @@ int main(void)
 			seq_idx = (seq_idx + 1) % ARRAY_SIZE(sequence);
 			k_msleep(500); /* Debounce */
 		} else if (gpio_pin_get_dt(&button_b) == 0) {
-			/* Show current speed */
-			uint8_t speed_l, speed_r;
-			printk("\n--- Speed check ---\n");
-			if (maqueen_speed_read(i2c_dev, &speed_l, &speed_r) == 0) {
-				printk("Speed: L=%d R=%d (cm/s: L=%d R=%d)\n",
-				       speed_l, speed_r, speed_l / 5, speed_r / 5);
-			}
+			/* Show position and reset */
+			printk("\n--- Current Position ---\n");
+			printk("Position: x=%d mm, y=%d mm\n", odom.x, odom.y);
+			printk("Heading:  %d deg\n", odometry_get_heading_deg(&odom));
+			printk("Distance: L=%d mm, R=%d mm, total=%d mm\n",
+			       odom.dist_left, odom.dist_right,
+			       odometry_get_distance_mm(&odom));
+			printk("\nResetting odometry...\n");
+			odometry_reset(&odom);
 			k_msleep(500); /* Debounce */
 		}
 

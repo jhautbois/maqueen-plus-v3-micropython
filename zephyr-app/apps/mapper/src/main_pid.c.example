@@ -1,0 +1,220 @@
+/*
+ * Mapper with PID-based navigation - Example implementation
+ *
+ * This shows how to integrate PID control into the mapper.
+ * Strategy: Discrete movements (forward 20cm, rotate 45°) instead of
+ * continuous motor control.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+
+#include "maqueen.h"
+#include "pid_control.h"
+#include "odometry.h"
+#include "sen0628.h"
+#include "occupancy_grid.h"
+#include "scanner_360.h"
+#include "frontier_nav.h"
+
+LOG_MODULE_REGISTER(mapper_pid, LOG_LEVEL_INF);
+
+/* PID navigation parameters */
+#define PID_STEP_DISTANCE_CM    20    /* Move forward in 20cm increments */
+#define PID_TURN_ANGLE_DEG      45    /* Turn in 45° increments */
+#define PID_MIN_CLEARANCE_MM    200   /* Minimum clearance to move forward */
+#define PID_SCAN_INTERVAL_MS    500   /* Time between LIDAR scans */
+
+static struct odometry odom;
+static struct occupancy_grid grid;
+
+/**
+ * @brief Find best direction to explore
+ *
+ * @param cols LIDAR column data
+ * @param current_heading Current heading in degrees
+ * @return Turn angle in degrees (-180 to 180), or INT16_MAX if no good direction
+ */
+static int16_t find_best_direction(const struct sen0628_columns *cols, int current_heading)
+{
+	struct frontier_result frontier;
+	int rx, ry;
+
+	/* Get robot position */
+	grid_world_to_cell(&grid, odom.x, odom.y, &rx, &ry);
+
+	/* Find best frontier */
+	int ret = frontier_find_best(&grid, rx, ry, current_heading, &frontier);
+	if (ret < 0 || frontier.exploration_complete) {
+		return INT16_MAX;  /* No good direction */
+	}
+
+	/* Calculate turn needed */
+	int target_deg = frontier.direction * 45;  /* dir 0-7 -> 0°,45°,90°,...,315° */
+	int turn = target_deg - current_heading;
+
+	/* Normalize to -180..180 */
+	while (turn > 180) turn -= 360;
+	while (turn < -180) turn += 360;
+
+	return turn;
+}
+
+/**
+ * @brief Check if path ahead is clear
+ */
+static bool is_path_clear(const struct sen0628_columns *cols)
+{
+	/* Check center columns */
+	int center_dist = (cols->min[3] + cols->min[4]) / 2;
+	return center_dist >= PID_MIN_CLEARANCE_MM;
+}
+
+/**
+ * @brief Main exploration loop with PID
+ */
+static void explore_with_pid(const struct device *lidar_dev)
+{
+	struct sen0628_columns cols;
+	int ret;
+
+	LOG_INF("Starting PID-based exploration");
+
+	while (true) {
+		/* Scan environment */
+		ret = sen0628_get_columns(lidar_dev, &cols);
+		if (ret < 0) {
+			LOG_ERR("LIDAR scan failed: %d", ret);
+			k_sleep(K_MSEC(1000));
+			continue;
+		}
+
+		/* Update grid */
+		grid_update_from_lidar(&grid, &cols, &odom);
+
+		/* Get current heading */
+		int heading_deg = odometry_get_heading_deg(&odom);
+
+		/* Find best direction */
+		int16_t turn_angle = find_best_direction(&cols, heading_deg);
+
+		/* Check if exploration complete */
+		if (turn_angle == INT16_MAX) {
+			LOG_INF("Exploration complete!");
+			break;
+		}
+
+		/* Obstacle avoidance: Check if path is clear */
+		if (!is_path_clear(&cols)) {
+			LOG_INF("Obstacle detected, turning...");
+
+			/* Turn away from obstacle */
+			if (cols.min[0] + cols.min[1] > cols.min[6] + cols.min[7]) {
+				/* Left is clearer, turn left */
+				ret = pid_rotate_ccw(PID_TURN_ANGLE_DEG);
+				if (ret == 0) {
+					odometry_update_pid_rotation(&odom, -PID_TURN_ANGLE_DEG * 1000);
+				}
+			} else {
+				/* Right is clearer, turn right */
+				ret = pid_rotate_cw(PID_TURN_ANGLE_DEG);
+				if (ret == 0) {
+					odometry_update_pid_rotation(&odom, PID_TURN_ANGLE_DEG * 1000);
+				}
+			}
+
+			k_sleep(K_MSEC(PID_SCAN_INTERVAL_MS));
+			continue;
+		}
+
+		/* Navigate toward frontier */
+		if (abs(turn_angle) > 20) {
+			/* Significant turn needed */
+			LOG_INF("Turning %d degrees toward frontier", turn_angle);
+
+			if (turn_angle > 0) {
+				/* Turn right (clockwise) */
+				uint8_t angle = MIN(abs(turn_angle), 180);
+				ret = pid_rotate_cw(angle);
+				if (ret == 0) {
+					odometry_update_pid_rotation(&odom, angle * 1000);
+				}
+			} else {
+				/* Turn left (counter-clockwise) */
+				uint8_t angle = MIN(abs(turn_angle), 180);
+				ret = pid_rotate_ccw(angle);
+				if (ret == 0) {
+					odometry_update_pid_rotation(&odom, -angle * 1000);
+				}
+			}
+		} else {
+			/* Path aligned, move forward */
+			LOG_INF("Moving forward %d cm", PID_STEP_DISTANCE_CM);
+
+			ret = pid_forward(PID_STEP_DISTANCE_CM);
+			if (ret == 0) {
+				odometry_update_pid_distance(&odom, PID_STEP_DISTANCE_CM * 10);  /* cm -> mm */
+			} else {
+				LOG_ERR("Forward movement failed: %d", ret);
+			}
+		}
+
+		/* Delay between movements */
+		k_sleep(K_MSEC(PID_SCAN_INTERVAL_MS));
+	}
+
+	LOG_INF("Exploration finished - final position: (%d, %d) mm, heading: %d°",
+		odom.x, odom.y, odometry_get_heading_deg(&odom));
+}
+
+/**
+ * @brief Main entry point
+ */
+int main(void)
+{
+	const struct device *i2c_dev;
+	const struct device *lidar_dev;
+	int ret;
+
+	LOG_INF("Mapper with PID control starting...");
+
+	/* Get I2C device */
+	i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(i2c_dev)) {
+		LOG_ERR("I2C device not ready");
+		return -1;
+	}
+
+	/* Get LIDAR device */
+	lidar_dev = DEVICE_DT_GET(DT_NODELABEL(lidar));
+	if (!device_is_ready(lidar_dev)) {
+		LOG_ERR("LIDAR device not ready");
+		return -1;
+	}
+
+	/* Initialize PID control */
+	ret = pid_init();
+	if (ret < 0) {
+		LOG_ERR("PID init failed: %d", ret);
+		return ret;
+	}
+
+	/* Initialize Maqueen */
+	ret = maqueen_init(i2c_dev);
+	if (ret < 0) {
+		LOG_ERR("Maqueen init failed: %d", ret);
+		return ret;
+	}
+
+	/* Initialize odometry */
+	odometry_init(&odom, i2c_dev);
+	odometry_reset(&odom);
+
+	/* Initialize grid */
+	grid_init(&grid);
+
+	/* Run exploration */
+	explore_with_pid(lidar_dev);
+
+	return 0;
+}
